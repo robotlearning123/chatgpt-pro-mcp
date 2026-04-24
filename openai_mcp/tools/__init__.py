@@ -9,6 +9,7 @@ from openai_mcp.tools import (
     gpts,
     instructions,
     memory,
+    writes,
 )
 
 
@@ -21,3 +22,4 @@ def register_all(mcp, client: BackendClient) -> None:
     gpts.register(mcp, client)
     conversations.register(mcp, client)
     apps.register(mcp, client)
+    writes.register(mcp, client)
