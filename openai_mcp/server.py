@@ -103,6 +103,33 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         return final_text or "(no response)"
 
+    @mcp.tool()
+    async def deep_research_heavy(query: str) -> str:
+        """Long-form Deep Research using gpt-5-5-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead."""
+        final_text = ""
+        refs: list = []
+        groups: list = []
+
+        async for event in conv.deep_research_heavy(query):
+            if event["type"] == "done":
+                final_text = event["text"]
+                refs = event.get("content_references", [])
+                groups = event.get("search_result_groups", [])
+
+        if refs:
+            lines = ["\n\n---\n**Sources:**"]
+            seen: set[str] = set()
+            for ref in refs:
+                for item in ref.get("items", []):
+                    url = item.get("url", "")
+                    title = item.get("title", url)
+                    if url and url not in seen:
+                        seen.add(url)
+                        lines.append(f"- [{title}]({url})")
+            final_text += "\n".join(lines)
+
+        return final_text or "(no response)"
+
     # image_gen intentionally unregistered in 0.0.1 — the gpt-image-2 endpoint
     # is unverified in the native SSE build. Tracked for PR5. Re-add the
     # `@mcp.tool()` decorator once the endpoint is implemented and tested.
