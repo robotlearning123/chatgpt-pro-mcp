@@ -1,66 +1,78 @@
 # openai-mcp
 
-A lightweight MCP server that connects **any OpenAI-compatible API** to Claude Code (and other MCP clients) in minutes.
+Use your **ChatGPT Plus or Pro** subscription inside Claude Code, Codex, and other AI coding tools.
 
-Works with: OpenAI, chatgpt2api, LM Studio, Ollama, Together.ai, Groq, or any custom endpoint.
-
-> **Personal use only.** See [Disclaimer](#disclaimer).
+One command to set up. Works in the background. Your account, your quota.
 
 ---
 
-## Install
+## Quick start
 
 ```bash
 pip install git+https://github.com/robotlearning123/chatgpt-pro-mcp.git
+openai-mcp setup
 ```
 
-Or clone and install locally:
+That's it. The setup wizard will:
 
-```bash
-git clone https://github.com/robotlearning123/chatgpt-pro-mcp
-cd chatgpt-pro-mcp
-pip install -e .
-```
+1. Log you into ChatGPT (opens your browser)
+2. Detect your plan (Plus or Pro)
+3. Start a local server
+4. Register it with Claude Code automatically
+
+Restart Claude Code when done.
 
 ---
 
-## Setup
+## What you get
 
-**1. Create a config file**
+Tools available inside Claude Code after setup:
 
-```bash
-cp config.example.toml config.toml   # or ~/.openai-mcp.toml
+| Tool | What it does | Plan |
+|------|-------------|------|
+| `chat` | Chat with GPT-4o, GPT-5, o3-pro and more | Plus + Pro |
+| `deep_research` | Web search + synthesized report with citations | Plus + Pro |
+| `image_gen` | Generate images with gpt-image-2 | Pro only |
+
+**Example prompts in Claude Code:**
+
+> *"Use deep_research to find recent papers on diffusion transformers"*
+>
+> *"Use chat with model gpt-5-5-pro to review this architecture"*
+>
+> *"Use image_gen to create a diagram of this system"*
+
+---
+
+## Requirements
+
+- Python 3.10+
+- A ChatGPT Plus ($20/mo) or Pro ($200/mo) subscription
+- Claude Code, Codex CLI, or any MCP-compatible agent
+
+---
+
+## How it works
+
+```
+Your ChatGPT account
+        ↓
+  local gateway  :3001   (handles auth, talks to ChatGPT)
+        ↓
+   MCP server    :9000   (Claude Code connects here)
+        ↓
+  Claude Code tools: chat / deep_research / image_gen
 ```
 
-Edit it:
+Everything runs locally on your machine. No data leaves except to OpenAI/ChatGPT — the same as using ChatGPT directly.
 
-```toml
-[api]
-base_url = "http://localhost:3001/v1"
-api_key  = "your-api-key"
+The server starts automatically at login (macOS LaunchAgent) and restarts if it crashes.
 
-[server]
-host = "0.0.0.0"
-port = 9000
+---
 
-[models]
-chat     = "gpt-4o"       # required — default chat model
-research = "research"     # optional — enables research tool
-image    = "gpt-image-2"  # optional — enables image_gen tool
-```
+## Connecting other tools
 
-Config is searched in order: `./config.toml` → `~/.openai-mcp.toml` → `~/.config/openai-mcp/config.toml`
-
-**2. Start the server**
-
-```bash
-openai-mcp
-# → openai-mcp running at http://0.0.0.0:9000/mcp  (tools: chat, research, image)
-```
-
-**3. Add to Claude Code**
-
-In `~/.claude.json` under `mcpServers`:
+**Any MCP client** — add this to its config:
 
 ```json
 {
@@ -73,136 +85,65 @@ In `~/.claude.json` under `mcpServers`:
 }
 ```
 
-Restart Claude Code. Done.
+**Any HTTP client / Python script:**
 
----
+```python
+from openai import OpenAI
 
-## Tools
-
-Tools are registered based on what's in `[models]`:
-
-| Tool | Config key | Description |
-|------|-----------|-------------|
-| `chat` | `models.chat` | Chat with any model. Always enabled. |
-| `research` | `models.research` | Deep web search + synthesis with citations. |
-| `image_gen` | `models.image` | Generate an image, returns base64 PNG. |
-
-Remove a key from `[models]` to disable that tool.
-
----
-
-## Options
-
-```
-openai-mcp [--config PATH] [--host HOST] [--port PORT] [--stdio]
-
-  --config PATH   Path to config.toml (overrides auto-search)
-  --host HOST     Override bind host
-  --port PORT     Override bind port
-  --stdio         Use stdio transport instead of HTTP
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="openai-mcp-local"
+)
+resp = client.chat.completions.create(
+    model="gpt-5-5-pro",
+    messages=[{"role": "user", "content": "Hello"}]
+)
 ```
 
 ---
 
-## macOS: auto-start at login
+## Commands
 
 ```bash
-bash install.sh
-```
-
-Installs a LaunchAgent so the server starts automatically and restarts if it crashes.
-
----
-
-## stdio mode (Claude Code legacy)
-
-If you prefer not to run a persistent server:
-
-```json
-{
-  "mcpServers": {
-    "openai": {
-      "type": "stdio",
-      "command": "openai-mcp",
-      "args": ["--stdio", "--config", "/path/to/config.toml"]
-    }
-  }
-}
+openai-mcp setup          # First-time setup (login + register)
+openai-mcp run            # Start server manually
+openai-mcp run --stdio    # stdio mode (Claude Code legacy config)
 ```
 
 ---
 
-## Common setups
+## Troubleshooting
 
-<details>
-<summary>ChatGPT Pro via chatgpt2api</summary>
+**"Tools not showing in Claude Code"** → Restart Claude Code after setup.
 
-```toml
-[api]
-base_url = "http://localhost:3001/v1"
-api_key  = "your-chatgpt2api-key"
+**"Login failed / token expired"** → Re-run `openai-mcp setup`. It refreshes your token.
 
-[models]
-chat     = "gpt-5-5-pro"
-research = "research"
-image    = "gpt-image-2"
+**"deep_research not available"** → Requires ChatGPT Plus or Pro plan.
+
+**Check logs:**
+```bash
+tail -f ~/.openai-mcp/mcp.log
+tail -f ~/.openai-mcp/chatgpt2api.log
 ```
 
-→ [chatgpt2api](https://github.com/lanqian528/chat2api)
-</details>
-
-<details>
-<summary>OpenAI API</summary>
-
-```toml
-[api]
-base_url = "https://api.openai.com/v1"
-api_key  = "sk-..."
-
-[models]
-chat  = "gpt-4o"
-image = "dall-e-3"
+**Restart server:**
+```bash
+launchctl stop com.user.openai-mcp
+launchctl start com.user.openai-mcp
 ```
-</details>
-
-<details>
-<summary>Local model via Ollama</summary>
-
-```toml
-[api]
-base_url = "http://localhost:11434/v1"
-api_key  = "ollama"
-
-[models]
-chat = "llama3.2"
-```
-</details>
-
-<details>
-<summary>Groq (fast inference)</summary>
-
-```toml
-[api]
-base_url = "https://api.groq.com/openai/v1"
-api_key  = "gsk_..."
-
-[models]
-chat = "llama-3.3-70b-versatile"
-```
-</details>
 
 ---
 
 ## Disclaimer
 
-**This project is for personal, non-commercial use only.**
+**Personal, non-commercial use only.**
 
-- This is a local bridge between MCP clients and an OpenAI-compatible API. It does not bypass, crack, or redistribute any proprietary API.
-- You are responsible for complying with the terms of service of whichever API you connect to.
-- Do not use this to resell API access, serve third parties, or build commercial products.
-- Do not expose the server to the public internet without authentication.
-- This project is not affiliated with OpenAI or Anthropic.
+This tool runs on your own machine using your own ChatGPT account. It does not bypass or resell OpenAI's services. You are responsible for complying with [OpenAI's Terms of Service](https://openai.com/policies/terms-of-use).
+
+Do not expose the local server to the internet or share your token.
+
+Not affiliated with OpenAI or Anthropic.
 
 ## License
 
-[MIT](LICENSE) — personal use only. Commercial use is not permitted.
+[MIT](LICENSE) — personal use only, commercial use not permitted.

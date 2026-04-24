@@ -7,28 +7,26 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import tomllib  # Python 3.11+
+    import tomllib
 except ImportError:
-    import tomli as tomllib  # pip install tomli
+    import tomli as tomllib  # type: ignore
 
 from openai import AsyncOpenAI
 from mcp.server.fastmcp import FastMCP
 
-# ---------------------------------------------------------------------------
-# Config loading
-# ---------------------------------------------------------------------------
+# ── config ──────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "api": {"base_url": "http://localhost:3001/v1", "api_key": "sk-placeholder"},
+_CONFIG_SEARCH = [
+    Path.home() / ".openai-mcp" / "config.toml",
+    Path("config.toml"),
+    Path.home() / ".config" / "openai-mcp" / "config.toml",
+]
+
+_DEFAULTS: dict[str, Any] = {
+    "api": {"base_url": "http://localhost:3001/v1", "api_key": "openai-mcp-local"},
     "server": {"host": "0.0.0.0", "port": 9000},
     "models": {"chat": "gpt-4o"},
 }
-
-_CONFIG_SEARCH = [
-    Path("config.toml"),
-    Path.home() / ".openai-mcp.toml",
-    Path.home() / ".config" / "openai-mcp" / "config.toml",
-]
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -37,42 +35,35 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         if p and p.exists():
             with open(p, "rb") as f:
                 data = tomllib.load(f)
-            # Merge with defaults so missing keys don't crash
-            merged = DEFAULT_CONFIG.copy()
+            merged = {k: dict(v) for k, v in _DEFAULTS.items()}
             for section, values in data.items():
                 merged.setdefault(section, {}).update(values)
             return merged
-    return DEFAULT_CONFIG.copy()
+    return {k: dict(v) for k, v in _DEFAULTS.items()}
 
 
-# ---------------------------------------------------------------------------
-# Build MCP server from config
-# ---------------------------------------------------------------------------
+# ── server ───────────────────────────────────────────────────────────────────
 
 
 def build_server(cfg: dict[str, Any]) -> FastMCP:
-    api_cfg = cfg["api"]
-    srv_cfg = cfg["server"]
-    models_cfg = cfg["models"]
+    api = cfg["api"]
+    srv = cfg["server"]
+    models = cfg["models"]
 
-    client = AsyncOpenAI(base_url=api_cfg["base_url"], api_key=api_cfg["api_key"])
+    client = AsyncOpenAI(base_url=api["base_url"], api_key=api["api_key"])
 
     mcp = FastMCP(
         "openai-mcp",
-        host=srv_cfg.get("host", "0.0.0.0"),
-        port=int(srv_cfg.get("port", 9000)),
+        host=str(srv.get("host", "0.0.0.0")),
+        port=int(srv.get("port", 9000)),
         log_level="WARNING",
     )
 
-    # ---- chat (always registered) -----------------------------------------
-    chat_model = models_cfg.get("chat", "gpt-4o")
+    chat_model = models.get("chat", "gpt-4o")
 
     @mcp.tool()
     async def chat(prompt: str, model: str = chat_model) -> str:
-        """Send a message to the configured chat model.
-
-        Leave `model` empty to use the default from config.
-        """
+        """Chat with an AI model. Pass a different `model` name to switch models."""
         resp = await client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -80,17 +71,15 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         )
         return resp.choices[0].message.content or ""
 
-    # ---- research (optional) ----------------------------------------------
-    if "research" in models_cfg:
-        research_model = models_cfg["research"]
+    if "research" in models:
+        research_model = models["research"]
 
         @mcp.tool()
-        async def research(query: str) -> str:
-            """Web search + synthesis with citations.
+        async def deep_research(query: str) -> str:
+            """Search the web and synthesize a detailed report with citations.
 
-            Performs deep research on the query and returns a detailed report.
-            Takes 30–90 seconds. Best for: current events, literature review,
-            market research, fact-checking.
+            Best for: current events, literature review, market research.
+            Takes 30–90 seconds.
             """
             resp = await client.chat.completions.create(
                 model=research_model,
@@ -99,67 +88,77 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
             )
             return resp.choices[0].message.content or ""
 
-    # ---- image_gen (optional) ---------------------------------------------
-    if "image" in models_cfg:
-        image_model = models_cfg["image"]
+    if "image" in models:
+        image_model = models["image"]
 
         @mcp.tool()
         async def image_gen(prompt: str) -> str:
-            """Generate an image from a text description.
-
-            Returns a base64-encoded PNG (data:image/png;base64,...).
-            Takes 60–120 seconds. Describe the image in detail for best results.
-            """
+            """Generate an image. Returns base64 PNG. Takes 60–120 seconds."""
             resp = await client.images.generate(
                 model=image_model,
                 prompt=prompt,
                 response_format="b64_json",
                 size="1024x1024",
             )
-            b64 = resp.data[0].b64_json
-            return f"data:image/png;base64,{b64}"
+            return f"data:image/png;base64,{resp.data[0].b64_json}"
 
     return mcp
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="openai-mcp",
-        description="MCP server for any OpenAI-compatible API",
+        description="Use your ChatGPT Plus/Pro in Claude Code and other AI agents.",
     )
-    parser.add_argument("--config", type=Path, help="Path to config.toml")
-    parser.add_argument(
-        "--stdio",
-        action="store_true",
-        help="Use stdio transport (for Claude Code legacy config)",
+    sub = parser.add_subparsers(dest="command")
+
+    # setup subcommand
+    sub.add_parser("setup", help="First-time setup wizard (login + register)")
+
+    # run (default)
+    run_p = sub.add_parser("run", help="Start the MCP server")
+    run_p.add_argument("--config", type=Path, help="Path to config.toml")
+    run_p.add_argument("--port", type=int)
+    run_p.add_argument("--host")
+    run_p.add_argument(
+        "--stdio", action="store_true", help="stdio transport (Claude Code legacy)"
     )
-    parser.add_argument("--port", type=int, help="Override server port")
-    parser.add_argument("--host", help="Override server host")
+
+    # bare flags for backward compat: openai-mcp --stdio --config ...
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--host")
+    parser.add_argument("--stdio", action="store_true")
+
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
-    if args.port:
+    if args.command == "setup":
+        from openai_mcp.setup import run_setup
+
+        run_setup()
+        return
+
+    # default: run server
+    cfg_path = getattr(args, "config", None)
+    cfg = load_config(cfg_path)
+    if getattr(args, "port", None):
         cfg["server"]["port"] = args.port
-    if args.host:
+    if getattr(args, "host", None):
         cfg["server"]["host"] = args.host
 
     mcp = build_server(cfg)
-    tools = [k for k in cfg["models"]]
+    tools = list(cfg["models"].keys())
+    stdio = getattr(args, "stdio", False)
 
-    if args.stdio:
+    if stdio:
         mcp.run(transport="stdio")
     else:
         host = cfg["server"]["host"]
         port = cfg["server"]["port"]
-        print(
-            f"openai-mcp → http://{host}:{port}/mcp  (tools: {', '.join(tools)})",
-            flush=True,
-        )
+        print(f"openai-mcp  http://{host}:{port}/mcp  [{', '.join(tools)}]", flush=True)
         mcp.run(transport="streamable-http")
 
 
