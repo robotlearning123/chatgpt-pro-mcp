@@ -447,6 +447,26 @@ class ConversationClient:
         (the orchestration layer).  The actual heavy reasoning runs inside the
         connector_openai_deep_research tool call.
         """
+        # --- B1: Quota guard ---
+        # Probe /backend-api/conversation/init once to check deep_research quota.
+        # Field path from live response: features.deep_research.remaining
+        _INIT_PATH = "/backend-api/conversation/init"
+        try:
+            init_data = self._backend.get(_INIT_PATH)
+            features = init_data.get("features") if isinstance(init_data, dict) else None
+            dr_feature = (features or {}).get("deep_research") if features else None
+            remaining = (dr_feature or {}).get("remaining") if dr_feature else None
+            if remaining is not None and int(remaining) <= 0:
+                raise RuntimeError(
+                    f"Deep Research quota exhausted. "
+                    f"Check {_BASE}{_INIT_PATH} to verify quota reset."
+                )
+        except RuntimeError:
+            raise
+        except Exception as _exc:
+            _log.warning("quota check failed (%s) — proceeding anyway", _exc)
+        # --- end quota guard ---
+
         headers = dict(self._backend._session.headers)
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
