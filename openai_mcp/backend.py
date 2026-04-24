@@ -118,3 +118,33 @@ class BackendClient:
             raise RuntimeError(f"HTTP {r.status_code} for {path}")
 
         return r.json()
+
+    def post(
+        self,
+        path: str,
+        json: Any = None,
+        target_path: str | None = None,
+        target_route: str | None = None,
+    ) -> Any:
+        extra: dict[str, str] = {"Content-Type": "application/json"}
+        if target_path is not None:
+            extra["X-OpenAI-Target-Path"] = target_path
+        if target_route is not None:
+            extra["X-OpenAI-Target-Route"] = target_route
+
+        r = self._session.post(_BASE + path, headers=extra, json=json, timeout=30)
+
+        if r.status_code == 401:
+            raise RuntimeError("401 Unauthorized — token expired, run `codex login`")
+        if r.status_code == 403:
+            raise RuntimeError(f"403 Forbidden for {path}")
+        if r.status_code == 404:
+            raise RuntimeError(f"404 Not Found: {path}")
+        if r.status_code == 405:
+            raise RuntimeError(f"405 Method Not Allowed: {path}")
+        if not (200 <= r.status_code < 300):
+            raise RuntimeError(f"HTTP {r.status_code} for {path}: {r.text[:200]}")
+
+        if not r.text.strip():
+            return None
+        return r.json()
