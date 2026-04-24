@@ -454,27 +454,30 @@ class ConversationClient:
         connector_openai_deep_research tool call.
         """
         # --- B1: Quota guard ---
-        # Probe /backend-api/conversation/init once to check deep_research quota.
-        # Field path from live response: features.deep_research.remaining
-        # Fail-open on any probe error (HTTP 4xx/5xx, JSON shape drift, etc.) —
-        # only the explicit "remaining <= 0" case aborts before burning a quota.
+        # Probe /backend-api/conversation/init (POST, body {"conversation_mode_kind":
+        # "primary_assistant"}) to check deep_research quota. Response shape:
+        #   limits_progress: [{"feature_name": "deep_research", "remaining": 244, ...}]
+        # Fail-open on any probe error (network / shape drift) — only the explicit
+        # "remaining <= 0" case aborts before burning a quota.
         _INIT_PATH = "/backend-api/conversation/init"
         remaining: int | None = None
         try:
-            init_data = self._backend.get(_INIT_PATH)
-            features = (
-                init_data.get("features") if isinstance(init_data, dict) else None
+            init_data = self._backend.post(
+                _INIT_PATH, json={"conversation_mode_kind": "primary_assistant"}
             )
-            dr_feature = (features or {}).get("deep_research") if features else None
-            raw_remaining = (dr_feature or {}).get("remaining") if dr_feature else None
-            if raw_remaining is not None:
-                remaining = int(raw_remaining)
+            limits = (init_data or {}).get("limits_progress") or []
+            for lim in limits:
+                if isinstance(lim, dict) and lim.get("feature_name") == "deep_research":
+                    raw = lim.get("remaining")
+                    if raw is not None:
+                        remaining = int(raw)
+                    break
         except Exception as _exc:
             _log.warning("DR quota check failed (%s) — proceeding anyway", _exc)
         if remaining is not None and remaining <= 0:
             raise RuntimeError(
                 f"Deep Research quota exhausted. "
-                f"Check {_BASE}{_INIT_PATH} to verify quota reset."
+                f"Check {_BASE}{_INIT_PATH} (POST) to verify quota reset."
             )
         # --- end quota guard ---
 
