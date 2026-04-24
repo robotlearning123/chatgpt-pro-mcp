@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -430,8 +431,13 @@ class ConversationClient:
     async def deep_research_heavy(self, query: str) -> AsyncIterator[dict]:
         """Stream true Pro-tier Deep Research events for *query*.
 
-        Uses the ground-truth payload reverse-engineered from chatgpt.com/deep-research
-        (2026-04-23).  Targets /backend-api/f/conversation with:
+        Two-phase: (1) SSE kickoff at /backend-api/f/conversation speaking
+        "delta_encoding v1" JSON-patches; (2) if the stream closes before the
+        assistant message reaches finished_successfully (async DR on complex
+        queries), poll /backend-api/conversation/{id} until it does.
+
+        Payload + endpoint ground-truth reverse-engineered from
+        chatgpt.com/deep-research browser traffic (2026-04-23):
 
             model = gpt-5-5-pro
             system_hints = ["connector:connector_openai_deep_research"]
@@ -447,18 +453,16 @@ class ConversationClient:
            "content_references": [...], "search_result_groups": [...]}
 
         Rate: consumes from the "deep_research" quota (248 uses / reset cycle on Pro).
-        Timeout: 1800 s (DR runs can take 5–30 minutes for complex queries).
+        Timeout: 1800 s for initial SSE; poll phase adds up to 1800 s more.
 
         Note: the resolved_model_slug in user-message echo will show "i-mini-m"
-        (the orchestration layer).  The actual heavy reasoning runs inside the
+        (the orchestration layer). The actual heavy reasoning runs inside the
         connector_openai_deep_research tool call.
         """
-        # --- B1: Quota guard ---
-        # Probe /backend-api/conversation/init (POST, body {"conversation_mode_kind":
-        # "primary_assistant"}) to check deep_research quota. Response shape:
-        #   limits_progress: [{"feature_name": "deep_research", "remaining": 244, ...}]
-        # Fail-open on any probe error (network / shape drift) — only the explicit
-        # "remaining <= 0" case aborts before burning a quota.
+        # --- Quota guard ---
+        # Probe /backend-api/conversation/init (POST) to check deep_research quota.
+        # Response shape: limits_progress: [{"feature_name": "deep_research", ...}].
+        # Fail-open on probe error; only "remaining <= 0" aborts.
         _INIT_PATH = "/backend-api/conversation/init"
         remaining: int | None = None
         try:
@@ -479,7 +483,6 @@ class ConversationClient:
                 f"Deep Research quota exhausted. "
                 f"Check {_BASE}{_INIT_PATH} (POST) to verify quota reset."
             )
-        # --- end quota guard ---
 
         headers = dict(self._backend._session.headers)
         headers["Accept"] = "text/event-stream"
@@ -495,6 +498,151 @@ class ConversationClient:
             headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
 
         payload = _build_heavy_dr_payload(query)
+
+        # --- Phase 1: SSE kickoff with JSON-patch delta parser ---
+        # /f/conversation speaks "delta_encoding v1". The first assistant envelope
+        # arrives as {"v": {"message": {...}}, "c": N}. Subsequent text chunks
+        # arrive as {"p": "/message/content/parts/0", "o": "append", "v": "..."}
+        # or the shortcut {"v": "..."} (continuation of last path).
+        # Batches: {"p": "", "o": "patch", "v": [<sub_patches>]}.
+        state = {
+            "conversation_id": None,
+            "resume_token": None,
+            "current_asst_id": None,
+            "asst_text": "",
+            "asst_status": "",
+            "asst_metadata": {},
+            "last_path": None,
+            "tool_invoked": False,
+            "done_emitted": False,
+        }
+
+        def _emit_done(events: list) -> None:
+            if state["done_emitted"]:
+                return
+            md = state["asst_metadata"] or {}
+            events.append(
+                {
+                    "type": "done",
+                    "text": state["asst_text"],
+                    "content_references": md.get("content_references", []) or [],
+                    "search_result_groups": md.get("search_result_groups", []) or [],
+                }
+            )
+            state["done_emitted"] = True
+
+        def _on_envelope(env: dict, events: list) -> None:
+            msg = env.get("message") or {}
+            role = (msg.get("author") or {}).get("role")
+            recipient = msg.get("recipient")
+            content = msg.get("content") or {}
+            ct = content.get("content_type")
+            if (
+                role == "assistant"
+                and recipient == "all"
+                and ct in ("text", "multimodal_text")
+            ):
+                state["current_asst_id"] = msg.get("id")
+                parts = content.get("parts") or []
+                initial = parts[0] if parts and isinstance(parts[0], str) else ""
+                state["asst_text"] = initial
+                state["asst_status"] = msg.get("status") or ""
+                state["asst_metadata"] = msg.get("metadata") or {}
+                if initial:
+                    events.append({"type": "progress", "text": initial})
+                if state["asst_status"] == "finished_successfully":
+                    _emit_done(events)
+            elif (
+                role == "assistant"
+                and isinstance(recipient, str)
+                and recipient.startswith("api_tool")
+            ):
+                parts = content.get("parts") or []
+                call = parts[0] if parts and isinstance(parts[0], str) else ""
+                if call:
+                    events.append({"type": "tool", "call": call})
+                state["tool_invoked"] = True
+
+        def _apply_path(path: str, op: str, value, events: list) -> None:
+            if path == "/message/content/parts/0":
+                if op == "append" and isinstance(value, str):
+                    state["asst_text"] += value
+                    if value:
+                        events.append({"type": "progress", "text": value})
+                elif op == "replace" and isinstance(value, str):
+                    if value.startswith(state["asst_text"]):
+                        delta = value[len(state["asst_text"]) :]
+                        if delta:
+                            events.append({"type": "progress", "text": delta})
+                    elif value:
+                        events.append({"type": "progress", "text": value})
+                    state["asst_text"] = value
+            elif path == "/message/status":
+                if op == "replace" and isinstance(value, str):
+                    state["asst_status"] = value
+                    if value == "finished_successfully":
+                        _emit_done(events)
+            elif path == "/message/metadata":
+                if op in ("append", "patch") and isinstance(value, dict):
+                    state["asst_metadata"] = {**state["asst_metadata"], **value}
+                elif op == "replace" and isinstance(value, dict):
+                    state["asst_metadata"] = value
+
+        def _apply_patch(obj: dict, events: list) -> None:
+            t = obj.get("type")
+            if t == "resume_conversation_token":
+                state["resume_token"] = obj.get("token")
+                if obj.get("conversation_id"):
+                    state["conversation_id"] = obj["conversation_id"]
+                return
+            if t in ("message_marker", "message_stream_complete"):
+                if obj.get("conversation_id"):
+                    state["conversation_id"] = obj["conversation_id"]
+                return
+            if t == "server_ste_metadata":
+                md = obj.get("metadata") or {}
+                if md.get("tool_invoked"):
+                    state["tool_invoked"] = True
+                events.append({"type": "meta", "data": md})
+                return
+            if t == "input_message":
+                return
+            if t is not None:
+                return
+
+            p = obj.get("p")
+            o = obj.get("o")
+            has_v = "v" in obj
+            v = obj.get("v")
+
+            # Full envelope: explicit {"p": "", "o": "add", ...}
+            # or implicit {"v": {"message": ...}, "c": N}
+            if (
+                isinstance(v, dict)
+                and "message" in v
+                and ((p == "" and o == "add") or (p is None and o is None))
+            ):
+                _on_envelope(v, events)
+                state["last_path"] = None
+                return
+
+            # Batch patch
+            if p == "" and o == "patch" and isinstance(v, list):
+                for sub in v:
+                    if isinstance(sub, dict):
+                        _apply_patch(sub, events)
+                return
+
+            # Path-scoped patch
+            if isinstance(p, str) and p:
+                _apply_path(p, o or "replace", v, events)
+                state["last_path"] = p
+                return
+
+            # Shortcut: bare "v" continues the last path (text-append)
+            if p is None and o is None and has_v and state["last_path"]:
+                _apply_path(state["last_path"], "append", v, events)
+                return
 
         async with AsyncSession(impersonate="chrome131", verify=True) as s:
             resp = await s.post(
@@ -522,79 +670,141 @@ class ConversationClient:
                     f"HTTP {resp.status_code} from {_F_CONV_URL}: {body[:500]}"
                 )
 
-            last_text = ""
-            done_emitted = False
+            async for raw_line in resp.aiter_lines():
+                if isinstance(raw_line, bytes):
+                    raw_line = raw_line.decode("utf-8", errors="replace")
+                line = raw_line.strip()
+                if not line or line.startswith(":") or line.startswith("event:"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+
+                events: list[dict] = []
+                _apply_patch(obj, events)
+                for e in events:
+                    yield e
+
+        # --- Phase 2: Async polling fallback ---
+        # If the stream closed without finished_successfully AND the DR
+        # connector fired, poll /backend-api/conversation/{id} until the
+        # real answer lands.
+        if (
+            not state["done_emitted"]
+            and state["conversation_id"]
+            and state["tool_invoked"]
+        ):
+            async for evt in self._poll_dr_completion(
+                state["conversation_id"], seed_text=state["asst_text"]
+            ):
+                yield evt
+            return
+
+        if not state["done_emitted"] and state["asst_text"]:
+            # Stream ended mid-text without finalize — surface what we have.
+            yield {
+                "type": "done",
+                "text": state["asst_text"],
+                "content_references": [],
+                "search_result_groups": [],
+                "terminated_abnormally": True,
+            }
+
+    async def _poll_dr_completion(
+        self,
+        conv_id: str,
+        *,
+        seed_text: str = "",
+        interval: float = 15.0,
+        max_wait: float = 1800.0,
+    ) -> AsyncIterator[dict]:
+        """Poll /backend-api/conversation/{id} until the DR answer lands.
+
+        Walks mapping[*].message for the latest assistant text node; yields
+        incremental progress until its status reaches finished_successfully
+        (or max_wait elapses).
+        """
+        detail_path = f"/backend-api/conversation/{conv_id}"
+        deadline = time.monotonic() + max_wait
+        last_emitted = seed_text
+
+        while time.monotonic() < deadline:
+            await asyncio.sleep(interval)
             try:
-                async for raw_line in resp.aiter_lines():
-                    if isinstance(raw_line, bytes):
-                        raw_line = raw_line.decode("utf-8", errors="replace")
-                    line = raw_line.strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(obj, dict):
-                        continue
+                det = await asyncio.to_thread(self._backend.get, detail_path)
+            except Exception as exc:
+                _log.warning("DR poll error (%s) — continuing", exc)
+                continue
 
-                    # Server-side telemetry / metadata event
-                    if obj.get("type") == "server_ste_metadata":
-                        yield {"type": "meta", "data": obj.get("metadata", {})}
-                        continue
+            mapping = (det or {}).get("mapping") or {}
+            candidates = []
+            for node in mapping.values():
+                msg = (node or {}).get("message")
+                if not isinstance(msg, dict):
+                    continue
+                if (msg.get("author") or {}).get("role") != "assistant":
+                    continue
+                recipient = msg.get("recipient")
+                if recipient and recipient != "all":
+                    continue
+                content = msg.get("content") or {}
+                if content.get("content_type") not in ("text", "multimodal_text"):
+                    continue
+                parts = content.get("parts") or []
+                text = parts[0] if parts and isinstance(parts[0], str) else ""
+                if not text:
+                    continue
+                candidates.append(
+                    (
+                        msg.get("create_time") or 0,
+                        msg.get("status") or "",
+                        text,
+                        msg.get("metadata") or {},
+                    )
+                )
+            if not candidates:
+                continue
+            candidates.sort(key=lambda c: c[0])
+            _, latest_status, latest_text, latest_meta = candidates[-1]
 
-                    msg = obj.get("message", {})
-                    if not isinstance(msg, dict):
-                        continue
+            if latest_text != last_emitted:
+                if latest_text.startswith(last_emitted):
+                    delta = latest_text[len(last_emitted) :]
+                    if delta:
+                        yield {"type": "progress", "text": delta}
+                else:
+                    yield {"type": "progress", "text": latest_text}
+                last_emitted = latest_text
 
-                    role = msg.get("author", {}).get("role", "")
-                    content = msg.get("content", {})
-                    ct = content.get("content_type", "")
-                    status = msg.get("status", "")
-                    meta = msg.get("metadata", {})
+            if latest_status == "finished_successfully":
+                yield {
+                    "type": "done",
+                    "text": latest_text,
+                    "content_references": latest_meta.get("content_references", [])
+                    or [],
+                    "search_result_groups": latest_meta.get("search_result_groups", [])
+                    or [],
+                }
+                return
 
-                    # Tool / connector invocation events
-                    if ct == "code" and role == "assistant":
-                        call_text = content.get("text", "")
-                        if call_text:
-                            yield {"type": "tool", "call": call_text}
-                        continue
-
-                    # Text streaming — assistant in-progress or finished
-                    if role == "assistant" and ct == "text":
-                        parts = content.get("parts") or []
-                        new = parts[0] if parts and isinstance(parts[0], str) else ""
-
-                        if status == "finished_successfully":
-                            yield {
-                                "type": "done",
-                                "text": new,
-                                "content_references": meta.get(
-                                    "content_references", []
-                                ),
-                                "search_result_groups": meta.get(
-                                    "search_result_groups", []
-                                ),
-                            }
-                            done_emitted = True
-                            last_text = new
-                        elif status == "in_progress" and new:
-                            if new.startswith(last_text):
-                                delta = new[len(last_text) :]
-                                if delta:
-                                    yield {"type": "progress", "text": delta}
-                            else:
-                                yield {"type": "progress", "text": new}
-                            last_text = new
-            finally:
-                if last_text and not done_emitted:
-                    yield {
-                        "type": "done",
-                        "text": last_text,
-                        "content_references": [],
-                        "search_result_groups": [],
-                        "terminated_abnormally": True,
-                    }
+        if last_emitted:
+            yield {
+                "type": "done",
+                "text": last_emitted,
+                "content_references": [],
+                "search_result_groups": [],
+                "terminated_abnormally": True,
+                "timeout": True,
+            }
+        else:
+            raise RuntimeError(
+                f"DR polling timed out after {max_wait}s waiting for conv {conv_id}"
+            )
