@@ -1,35 +1,37 @@
 #!/usr/bin/env bash
-# ChatGPT Pro MCP Server — one-command installer
+# openai-mcp — macOS LaunchAgent installer
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLIST_LABEL="com.user.chatgpt-pro-mcp"
+PLIST_LABEL="com.user.openai-mcp"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
-echo "=== ChatGPT Pro MCP Server Installer ==="
+echo "=== openai-mcp installer ==="
 
-# 1. Check Python
-if ! command -v python3 &>/dev/null; then
-  echo "ERROR: python3 not found. Install from https://python.org"
+# 1. Install package
+echo "[1/3] Installing openai-mcp..."
+pip3 install -q -e "$REPO_DIR"
+
+BINARY="$(command -v openai-mcp)"
+if [ -z "$BINARY" ]; then
+  echo "ERROR: openai-mcp not found after install. Check your PATH."
   exit 1
 fi
 
-# 2. Install dependencies
-echo "[1/3] Installing Python dependencies..."
-pip3 install -q -r "$REPO_DIR/requirements.txt"
+# 2. Config
+CONFIG="$REPO_DIR/config.toml"
+if [ ! -f "$CONFIG" ]; then
+  echo ""
+  echo "[2/3] No config.toml found. Creating from example..."
+  cp "$REPO_DIR/config.example.toml" "$CONFIG"
+  echo "      Edit $CONFIG before continuing."
+  echo "      Then re-run: bash install.sh"
+  exit 0
+fi
+echo "[2/3] Using config: $CONFIG"
 
-# 3. Prompt for config
-echo ""
-echo "[2/3] Configuration"
-read -rp "  CHATGPT_BASE_URL [http://localhost:3001/v1]: " BASE_URL
-BASE_URL="${BASE_URL:-http://localhost:3001/v1}"
-read -rp "  CHATGPT_API_KEY: " API_KEY
-read -rp "  MCP_PORT [9000]: " PORT
-PORT="${PORT:-9000}"
-
-# 4. Write LaunchAgent
-echo ""
-echo "[3/3] Installing LaunchAgent (auto-start at login)..."
+# 3. LaunchAgent
+echo "[3/3] Installing LaunchAgent..."
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -39,8 +41,9 @@ cat > "$PLIST_PATH" <<PLIST
     <string>$PLIST_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$(command -v python3)</string>
-        <string>$REPO_DIR/server.py</string>
+        <string>$BINARY</string>
+        <string>--config</string>
+        <string>$CONFIG</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO_DIR</string>
@@ -52,15 +55,6 @@ cat > "$PLIST_PATH" <<PLIST
     <string>$REPO_DIR/server.log</string>
     <key>StandardErrorPath</key>
     <string>$REPO_DIR/server.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>CHATGPT_BASE_URL</key>
-        <string>$BASE_URL</string>
-        <key>CHATGPT_API_KEY</key>
-        <string>$API_KEY</string>
-        <key>MCP_PORT</key>
-        <string>$PORT</string>
-    </dict>
 </dict>
 </plist>
 PLIST
@@ -69,22 +63,33 @@ launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 sleep 2
 
-# 5. Verify
+# Detect port from config
+PORT=$(python3 -c "
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+with open('$CONFIG', 'rb') as f:
+    c = tomllib.load(f)
+print(c.get('server', {}).get('port', 9000))
+" 2>/dev/null || echo 9000)
+
+# 4. Verify
 if curl -sf "http://localhost:$PORT/mcp" \
     -X POST -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"install-check","version":"1"}}}' \
-    | grep -q "chatgpt-pro"; then
+    | grep -q "openai-mcp"; then
   echo ""
   echo "✓ Server running at http://localhost:$PORT/mcp"
 else
-  echo "WARNING: Server may not be running. Check: tail -f $REPO_DIR/server.log"
+  echo "WARNING: Server may not have started. Check: tail -f $REPO_DIR/server.log"
 fi
 
 echo ""
-echo "=== Add to Claude Code (~/.claude.json mcpServers) ==="
+echo "Add to ~/.claude.json:"
 echo '{'
-echo "  \"chatgpt-pro\": { \"type\": \"url\", \"url\": \"http://localhost:$PORT/mcp\" }"
+echo "  \"mcpServers\": {"
+echo "    \"openai\": { \"type\": \"url\", \"url\": \"http://localhost:$PORT/mcp\" }"
+echo "  }"
 echo '}'
-echo ""
-echo "Done. Restart Claude Code to pick up the new MCP server."

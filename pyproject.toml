@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "openai-mcp"
+version = "0.2.0"
+description = "MCP server for any OpenAI-compatible API — expose chat, research, and image generation as MCP tools"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.26.0",
+    "openai>=1.0.0",
+    "uvicorn>=0.30.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+]
+
+[project.scripts]
+openai-mcp = "openai_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/robotlearning123/chatgpt-pro-mcp"

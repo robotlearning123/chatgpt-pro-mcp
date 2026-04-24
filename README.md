@@ -1,54 +1,71 @@
-# chatgpt-pro-mcp
+# openai-mcp
 
-An MCP server that exposes **ChatGPT Pro models** to Claude Code and any other MCP client — one running process, shared by all agents.
+A lightweight MCP server that connects **any OpenAI-compatible API** to Claude Code (and other MCP clients) in minutes.
 
-> **Personal use only.** See [Disclaimer](#disclaimer) before using.
+Works with: OpenAI, chatgpt2api, LM Studio, Ollama, Together.ai, Groq, or any custom endpoint.
 
-## What it does
+> **Personal use only.** See [Disclaimer](#disclaimer).
 
-Wraps an OpenAI-compatible API (e.g. [chatgpt2api](https://github.com/lanqian528/chat2api)) and serves three tools over HTTP:
+---
 
-| Tool | Model | Use for |
-|------|-------|---------|
-| `ask_gpt_pro` | gpt-5-5-pro (default), gpt-5-4-pro, o3-pro, gpt-5-5-thinking | Reasoning, code, long-context |
-| `deep_research` | research | Web search + synthesis with citations |
-| `gpt_image_gen` | gpt-image-2 | Image generation (returns base64 PNG) |
+## Install
 
-## Requirements
+```bash
+pip install git+https://github.com/robotlearning123/chatgpt-pro-mcp.git
+```
 
-- Python 3.10+
-- A running OpenAI-compatible API pointed at your ChatGPT Pro account  
-  → [chatgpt2api](https://github.com/lanqian528/chat2api) works well for this
-
-## Quick start
+Or clone and install locally:
 
 ```bash
 git clone https://github.com/robotlearning123/chatgpt-pro-mcp
 cd chatgpt-pro-mcp
-pip install -r requirements.txt
-
-# Run (HTTP mode, default port 9000)
-CHATGPT_BASE_URL=http://localhost:3001/v1 \
-CHATGPT_API_KEY=your-key \
-python3 server.py
+pip install -e .
 ```
 
-## macOS auto-start
+---
+
+## Setup
+
+**1. Create a config file**
 
 ```bash
-bash install.sh   # interactive — prompts for URL, key, port
+cp config.example.toml config.toml   # or ~/.openai-mcp.toml
 ```
 
-Installs a LaunchAgent that keeps the server alive across reboots.
+Edit it:
 
-## Connect to Claude Code
+```toml
+[api]
+base_url = "http://localhost:3001/v1"
+api_key  = "your-api-key"
 
-Add to `~/.claude.json` under `mcpServers`:
+[server]
+host = "0.0.0.0"
+port = 9000
+
+[models]
+chat     = "gpt-4o"       # required — default chat model
+research = "research"     # optional — enables research tool
+image    = "gpt-image-2"  # optional — enables image_gen tool
+```
+
+Config is searched in order: `./config.toml` → `~/.openai-mcp.toml` → `~/.config/openai-mcp/config.toml`
+
+**2. Start the server**
+
+```bash
+openai-mcp
+# → openai-mcp running at http://0.0.0.0:9000/mcp  (tools: chat, research, image)
+```
+
+**3. Add to Claude Code**
+
+In `~/.claude.json` under `mcpServers`:
 
 ```json
 {
   "mcpServers": {
-    "chatgpt-pro": {
+    "openai": {
       "type": "url",
       "url": "http://localhost:9000/mcp"
     }
@@ -56,47 +73,58 @@ Add to `~/.claude.json` under `mcpServers`:
 }
 ```
 
-Restart Claude Code. Tools appear as `mcp__chatgpt-pro__ask_gpt_pro`, etc.
+Restart Claude Code. Done.
 
-## Connect from any HTTP client
+---
 
-The server speaks [MCP streamable-http](https://spec.modelcontextprotocol.io/specification/basic/transports/).  
-Quick smoke-test:
+## Tools
 
-```bash
-curl http://localhost:9000/mcp \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+Tools are registered based on what's in `[models]`:
+
+| Tool | Config key | Description |
+|------|-----------|-------------|
+| `chat` | `models.chat` | Chat with any model. Always enabled. |
+| `research` | `models.research` | Deep web search + synthesis with citations. |
+| `image_gen` | `models.image` | Generate an image, returns base64 PNG. |
+
+Remove a key from `[models]` to disable that tool.
+
+---
+
+## Options
+
+```
+openai-mcp [--config PATH] [--host HOST] [--port PORT] [--stdio]
+
+  --config PATH   Path to config.toml (overrides auto-search)
+  --host HOST     Override bind host
+  --port PORT     Override bind port
+  --stdio         Use stdio transport instead of HTTP
 ```
 
-## Configuration
+---
 
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `CHATGPT_BASE_URL` | `http://localhost:3001/v1` | OpenAI-compatible base URL |
-| `CHATGPT_API_KEY` | `sk-placeholder` | API key |
-| `MCP_HOST` | `0.0.0.0` | Bind host |
-| `MCP_PORT` | `9000` | Bind port |
-
-## stdio mode (legacy)
+## macOS: auto-start at login
 
 ```bash
-python3 server.py --stdio
+bash install.sh
 ```
+
+Installs a LaunchAgent so the server starts automatically and restarts if it crashes.
+
+---
+
+## stdio mode (Claude Code legacy)
+
+If you prefer not to run a persistent server:
 
 ```json
 {
   "mcpServers": {
-    "chatgpt-pro": {
+    "openai": {
       "type": "stdio",
-      "command": "python3",
-      "args": ["/path/to/server.py", "--stdio"],
-      "env": {
-        "CHATGPT_BASE_URL": "http://localhost:3001/v1",
-        "CHATGPT_API_KEY": "your-key"
-      }
+      "command": "openai-mcp",
+      "args": ["--stdio", "--config", "/path/to/config.toml"]
     }
   }
 }
@@ -104,18 +132,77 @@ python3 server.py --stdio
 
 ---
 
+## Common setups
+
+<details>
+<summary>ChatGPT Pro via chatgpt2api</summary>
+
+```toml
+[api]
+base_url = "http://localhost:3001/v1"
+api_key  = "your-chatgpt2api-key"
+
+[models]
+chat     = "gpt-5-5-pro"
+research = "research"
+image    = "gpt-image-2"
+```
+
+→ [chatgpt2api](https://github.com/lanqian528/chat2api)
+</details>
+
+<details>
+<summary>OpenAI API</summary>
+
+```toml
+[api]
+base_url = "https://api.openai.com/v1"
+api_key  = "sk-..."
+
+[models]
+chat  = "gpt-4o"
+image = "dall-e-3"
+```
+</details>
+
+<details>
+<summary>Local model via Ollama</summary>
+
+```toml
+[api]
+base_url = "http://localhost:11434/v1"
+api_key  = "ollama"
+
+[models]
+chat = "llama3.2"
+```
+</details>
+
+<details>
+<summary>Groq (fast inference)</summary>
+
+```toml
+[api]
+base_url = "https://api.groq.com/openai/v1"
+api_key  = "gsk_..."
+
+[models]
+chat = "llama-3.3-70b-versatile"
+```
+</details>
+
+---
+
 ## Disclaimer
 
-**This project is intended for personal, non-commercial use only.**
+**This project is for personal, non-commercial use only.**
 
-- This tool is a local MCP bridge. It does **not** bypass, crack, or redistribute OpenAI's API — it connects to an OpenAI-compatible backend using credentials you own.
-- You are solely responsible for ensuring your usage complies with [OpenAI's Terms of Service](https://openai.com/policies/terms-of-use) and the terms of any backend service you connect it to.
-- **Do not** use this tool to resell API access, serve third parties, or operate a commercial service.
-- **Do not** share your API keys publicly or expose the server to the open internet without authentication.
-- The authors provide this software as-is, with no warranty of any kind. Use at your own risk.
-
-This project is not affiliated with, endorsed by, or sponsored by OpenAI or Anthropic.
+- This is a local bridge between MCP clients and an OpenAI-compatible API. It does not bypass, crack, or redistribute any proprietary API.
+- You are responsible for complying with the terms of service of whichever API you connect to.
+- Do not use this to resell API access, serve third parties, or build commercial products.
+- Do not expose the server to the public internet without authentication.
+- This project is not affiliated with OpenAI or Anthropic.
 
 ## License
 
-[MIT](LICENSE) — free for personal use. Commercial use is not permitted.
+[MIT](LICENSE) — personal use only. Commercial use is not permitted.
