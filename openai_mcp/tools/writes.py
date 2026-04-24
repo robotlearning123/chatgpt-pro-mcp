@@ -31,3 +31,18 @@ def register(mcp, client: BackendClient) -> None:
             json=payload,
             target_path="/backend-api/user_system_messages",
         )
+
+    @mcp.tool()
+    def memory_add(content: str) -> dict:
+        """Add a new ChatGPT memory.
+
+        SPIKE FINDING 2026-04-23: POST /backend-api/memories returns 405
+        Method Not Allowed (Allow: GET only). PATCH and PUT also 405.
+        Memory creation is model-initiated only — not available via REST.
+        """
+        # POST → 405, PATCH → 405, PUT → 405, OPTIONS → Allow: GET
+        raise RuntimeError(
+            "POST /backend-api/memories is not supported — server returns 405 "
+            "Method Not Allowed (Allow: GET). Memory creation must go through "
+            "a ChatGPT conversation (model-initiated only)."
+        )
