@@ -82,7 +82,18 @@ class ConversationClient:
                     f"HTTP {resp.status_code} from /backend-api/conversation"
                 )
 
+            current_msg_id: str | None = None
             last_text = ""
+
+            def _reset_if_new_msg(msg_id: str | None) -> bool:
+                """Return True if this frame starts a new message (caller must not dedupe)."""
+                nonlocal current_msg_id, last_text
+                if msg_id and msg_id != current_msg_id:
+                    current_msg_id = msg_id
+                    last_text = ""
+                    return True
+                return False
+
             async for raw_line in resp.aiter_lines():
                 if isinstance(raw_line, bytes):
                     raw_line = raw_line.decode("utf-8", errors="replace")
@@ -101,15 +112,23 @@ class ConversationClient:
                 v = obj.get("v")
                 if v is not None:
                     if isinstance(v, str):
+                        # String v-patch — continuation of current message id
                         if v:
                             yield v
                             last_text += v
                         continue
                     if isinstance(v, dict):
+                        msg_id = v.get("message", {}).get("id")
+                        is_new = _reset_if_new_msg(msg_id)
                         parts = v.get("message", {}).get("content", {}).get("parts", [])
                         if parts and isinstance(parts[0], str):
                             new = parts[0]
-                            if new.startswith(last_text):
+                            if is_new:
+                                # New message — yield fresh, don't dedupe against prior stream
+                                if new:
+                                    yield new
+                                    last_text = new
+                            elif new.startswith(last_text):
                                 delta = new[len(last_text) :]
                                 if delta:
                                     yield delta
@@ -131,8 +150,14 @@ class ConversationClient:
                 parts = content.get("parts") or []
                 if not parts or not isinstance(parts[0], str):
                     continue
+                msg_id = msg.get("id")
+                is_new = _reset_if_new_msg(msg_id)
                 new = parts[0]
-                if new.startswith(last_text):
+                if is_new:
+                    if new:
+                        yield new
+                        last_text = new
+                elif new.startswith(last_text):
                     delta = new[len(last_text) :]
                     if delta:
                         yield delta
