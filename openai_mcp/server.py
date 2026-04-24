@@ -77,10 +77,14 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         """
         return await conv.complete("research", [{"role": "user", "content": query}])
 
-    @mcp.tool()
-    async def image_gen(prompt: str) -> str:
-        """Generate an image with gpt-image-2. Returns base64 PNG."""
-        raise NotImplementedError("image_gen requires gpt-image-2 — TODO")
+    # image_gen intentionally unregistered in 0.0.1 — the gpt-image-2 endpoint
+    # is unverified in the native SSE build. Tracked for PR5. Re-add the
+    # `@mcp.tool()` decorator once the endpoint is implemented and tested.
+    async def image_gen(prompt: str) -> str:  # noqa: F841 (kept for PR5 wiring)
+        """Placeholder for future gpt-image-2 support (not exposed as a tool)."""
+        raise NotImplementedError(
+            "image_gen not available in 0.0.1 — see PR5 for implementation"
+        )
 
     try:
         from openai_mcp.tools import register_all
