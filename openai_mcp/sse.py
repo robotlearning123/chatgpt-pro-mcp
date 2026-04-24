@@ -232,6 +232,8 @@ class ConversationClient:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(obj, dict):
+                    continue
 
                 # Format A: v-patch (live streaming mode)
                 v = obj.get("v")
@@ -366,6 +368,8 @@ class ConversationClient:
                     try:
                         obj = json.loads(data)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(obj, dict):
                         continue
 
                     msg = obj.get("message", {})
@@ -530,6 +534,8 @@ class ConversationClient:
                     try:
                         obj = json.loads(data)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(obj, dict):
                         continue
 
                     # Server-side telemetry / metadata event
