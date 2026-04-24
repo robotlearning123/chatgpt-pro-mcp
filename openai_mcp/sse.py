@@ -395,7 +395,9 @@ class ConversationClient:
                             yield {
                                 "type": "done",
                                 "text": new,
-                                "content_references": meta.get("content_references", []),
+                                "content_references": meta.get(
+                                    "content_references", []
+                                ),
                                 "search_result_groups": meta.get(
                                     "search_result_groups", []
                                 ),
@@ -405,7 +407,7 @@ class ConversationClient:
                         elif status == "in_progress" and new:
                             # Emit incremental text delta
                             if new.startswith(last_text):
-                                delta = new[len(last_text):]
+                                delta = new[len(last_text) :]
                                 if delta:
                                     yield {"type": "progress", "text": delta}
                             else:
@@ -450,21 +452,26 @@ class ConversationClient:
         # --- B1: Quota guard ---
         # Probe /backend-api/conversation/init once to check deep_research quota.
         # Field path from live response: features.deep_research.remaining
+        # Fail-open on any probe error (HTTP 4xx/5xx, JSON shape drift, etc.) —
+        # only the explicit "remaining <= 0" case aborts before burning a quota.
         _INIT_PATH = "/backend-api/conversation/init"
+        remaining: int | None = None
         try:
             init_data = self._backend.get(_INIT_PATH)
-            features = init_data.get("features") if isinstance(init_data, dict) else None
+            features = (
+                init_data.get("features") if isinstance(init_data, dict) else None
+            )
             dr_feature = (features or {}).get("deep_research") if features else None
-            remaining = (dr_feature or {}).get("remaining") if dr_feature else None
-            if remaining is not None and int(remaining) <= 0:
-                raise RuntimeError(
-                    f"Deep Research quota exhausted. "
-                    f"Check {_BASE}{_INIT_PATH} to verify quota reset."
-                )
-        except RuntimeError:
-            raise
+            raw_remaining = (dr_feature or {}).get("remaining") if dr_feature else None
+            if raw_remaining is not None:
+                remaining = int(raw_remaining)
         except Exception as _exc:
-            _log.warning("quota check failed (%s) — proceeding anyway", _exc)
+            _log.warning("DR quota check failed (%s) — proceeding anyway", _exc)
+        if remaining is not None and remaining <= 0:
+            raise RuntimeError(
+                f"Deep Research quota exhausted. "
+                f"Check {_BASE}{_INIT_PATH} to verify quota reset."
+            )
         # --- end quota guard ---
 
         headers = dict(self._backend._session.headers)
@@ -556,7 +563,9 @@ class ConversationClient:
                             yield {
                                 "type": "done",
                                 "text": new,
-                                "content_references": meta.get("content_references", []),
+                                "content_references": meta.get(
+                                    "content_references", []
+                                ),
                                 "search_result_groups": meta.get(
                                     "search_result_groups", []
                                 ),
@@ -565,7 +574,7 @@ class ConversationClient:
                             last_text = new
                         elif status == "in_progress" and new:
                             if new.startswith(last_text):
-                                delta = new[len(last_text):]
+                                delta = new[len(last_text) :]
                                 if delta:
                                     yield {"type": "progress", "text": delta}
                             else:
